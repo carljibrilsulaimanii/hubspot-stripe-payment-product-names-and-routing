@@ -1,0 +1,12 @@
+{
+  "name": "hubspot-stripe-payment-product-names-and-routing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stamp product names onto Stripe (or HubSpot) payment records in HubSpot, then route each buyer by product. Zero dependencies.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
