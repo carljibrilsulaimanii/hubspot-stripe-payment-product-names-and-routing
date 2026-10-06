@@ -6,7 +6,8 @@
            in HubSpot (Stripe-synced payments, or HubSpot's own Payments object), then
            routing each buyer into the right product workflow from one master router.
   Why:     HubSpot payment records carry no product field, and Stripe's payment
-           description is often blank, so nothing can be reported, nurtured or routed
+           description is blank for some payments and free text for the rest, so
+           nothing can be reliably reported, nurtured or routed
            by product.
 -->
 
@@ -33,9 +34,10 @@ version will be its own repo.
 **HubSpot doesn't know what was bought.**
 
 - **Stripe-synced payments:** HubSpot's Stripe Data Sync copies each PaymentIntent
-  into a custom object. A PaymentIntent has no line items, and its `description` is
-  often blank (Stripe fills it only for invoices and subscriptions). So a payment
-  record says how much, but not what for. Data Sync copies the blank faithfully.
+  into a custom object. A PaymentIntent has no line items. Its `description` is
+  whatever the checkout set: an invoice number, a product name with its price, or, for
+  some Stripe-hosted checkouts, nothing at all. Data Sync copies the blank faithfully,
+  so those payment records say how much, but not what for.
 - **HubSpot Payments:** the object has no product property at all, and HubSpot
   doesn't let you add a custom property to it in **Settings → Properties**. The
   product lives only on associated line items, which the payments table can't show.
@@ -54,7 +56,7 @@ every product workflow re-checking every payment.
 ## How it works
 
 ```text
- Stripe payment ──► HubSpot Stripe Data Sync ──► payment record (description blank)
+ Stripe payment ──► HubSpot Stripe Data Sync ──► payment record (description sometimes blank)
                                                     │
                      Workflow A: Product names      │  description is unknown
                      delay 1 min → custom code ─────┤  GET checkout session by payment_intent,
@@ -115,7 +117,10 @@ every product workflow re-checking every payment.
 About 5 minutes.
 
 **1a.** Find the custom object Stripe Data Sync writes payments into (for example
-"Stripe Payment Transactions"). Copy its type id (`2-12345678`) from the URL of its
+"Stripe Payment Transactions"). Its sync settings (**Stripe Payment Transaction
+sync**: **Configure · Limit · Organize · Review**) show the direction, Stripe →
+HubSpot, one way, and **Record matching**, typically **Do no matching** (wording may
+differ). Copy its type id (`2-12345678`) from the URL of its
 records page, and paste it as `OBJECT_TYPE` at the top of
 [`workflow-action/stripe-payment-product-names.js`](workflow-action/stripe-payment-product-names.js).
 
@@ -124,7 +129,7 @@ records page, and paste it as `OBJECT_TYPE` at the top of
 | Synced property | Holds | The code's input name |
 |---|---|---|
 | **Stripe Payment Transaction ID** | The PaymentIntent id, `pi_...` | `stripe_payment_transaction_id` |
-| **Description** (`description`) | Stripe's description, often blank | `description` |
+| **Description** (`description`) | Stripe's description; blank for some checkouts | `description` |
 
 **1c.** Add one property in **Settings → Properties**, on that object:
 **Product Name**, internal name `product_name`, **Single-line text**.
@@ -155,8 +160,10 @@ Create it and copy the `rk_live_...` key.
 
 About 5 minutes.
 
-**3a.** Create a service key (or private app) named for this job, with
-`crm.objects.custom.read` and `crm.objects.custom.write`.
+**3a.** In HubSpot's **Service Keys** page (Settings → Integrations, wording may differ),
+click **Create service key**. Name it for this job (for example `Update Purchase w/
+Product Info`) and give it `crm.objects.custom.read` and `crm.objects.custom.write`.
+The key's page then lists its **Scopes**, with **Rotate**, **View Logs** and **Edit**.
 
 > ⚠️ **Give this action its own key.** In production the first version fell back to
 > another integration's secret when its own wasn't attached. That key was valid, so it
@@ -212,9 +219,19 @@ lookup.
    | `distinctProducts` | Number |
    | `status` | String |
 
-**4e. Test action.** Pick a recent payment made through a Stripe Checkout or Payment
-Link. Success: `status: updated` and `products` listing what was bought. Logs show
-`using secret: HUBSPOT_PAYMENTS_TOKEN` and `record ... : N line item(s) -> "..."`.
+   An output only shows up when it's defined in **both** the code and this form; until
+   then **Test action** lists it as *"Not defined in code"*.
+
+**4e. Test action.** At the bottom of the custom code panel, open **Test action**, pick a
+recent payment made through a Stripe Checkout or Payment Link, and click **Test**.
+
+> ⚠️ **A test edits the real record.** HubSpot says so: *"Changes will be applied to your
+> payment."* That's harmless here (it writes the product name the workflow would write
+> anyway), but test on a payment you don't mind changing.
+
+Success: **Status** *Success*, `status: updated` and `products` listing what was
+bought. **Logs** show `using secret: HUBSPOT_PAYMENTS_TOKEN` and
+`record ... : N line item(s) -> "..."`, plus memory and runtime.
 
 | `status` | Meaning |
 |---|---|
@@ -249,7 +266,16 @@ If you take payments through HubSpot Commerce instead (the **Payment** object), 
 product names come from the payment's associated line items, not from Stripe.
 
 **V1. Create the property.** HubSpot doesn't allow custom properties on Payments in
-the UI, so run the script (it needs `crm.schemas.commercepayments.write`):
+the UI. Two ways, both needing `crm.schemas.commercepayments.write` on the key:
+
+*From inside HubSpot (no terminal; how it was first done).* Build the workflow in V2,
+but paste **all** of
+[`workflow-action/create-products-purchased-property-action.js`](workflow-action/create-products-purchased-property-action.js)
+into the custom code action first, and run **Test action** once. The logs read
+*"Created property "products_purchased" (textarea) in group "..."* and *"Now replace
+this code with hubspot-payments-product-names.js and re-test."* Then do exactly that.
+
+*From your computer:*
 
 ```powershell
 $env:HUBSPOT_TOKEN = "<service key>"
@@ -263,14 +289,19 @@ property group and is safe to re-run (*"already exists ... Nothing to do."*). Th
 it as a column in the payments table and to the record via **Customize record**.
 
 **V2. The workflow.** Object type **Payment**. Trigger: **Status is any of Succeeded**.
-Add a **Custom code** action, Node.js 20.x, secret `HUBSPOT_PAYMENTS_TOKEN` (scopes
-`crm.objects.commercepayments.read`, `crm.objects.commercepayments.write`,
-`crm.objects.line_items.read`). It needs no inputs. Paste **all** of
+Add a **Delay** (1 minute), then a **Custom code** action, Node.js 20.x, secret
+`HUBSPOT_PAYMENTS_TOKEN` (scopes `crm.objects.commercepayments.read`,
+`crm.objects.commercepayments.write`, `crm.objects.line_items.read`). It needs no
+inputs. Paste **all** of
 [`workflow-action/hubspot-payments-product-names.js`](workflow-action/hubspot-payments-product-names.js),
 with the same four outputs as Step 4d.
 
-> ⚠️ **Line items arrive a beat after the payment.** If test runs return
-> `no_line_items`, add a **Delay** before the action.
+> ⚠️ **Line items arrive a beat after the payment.** That's what the delay is for. If
+> runs still return `no_line_items`, lengthen it.
+
+> ⚠️ **Republish after changing the code.** In production a fixed action kept failing
+> with *"The custom code threw an error..."* in the action logs because the workflow
+> was still running the old published version.
 
 > ⚠️ **What it doesn't tell you.** Line items keep the list price while the payment
 > holds what was actually charged (after any discount). Products purchased says what
@@ -285,7 +316,15 @@ with the same four outputs as Step 4d.
 About 10 minutes per product.
 
 **6a.** For each product line (tickets, a course, a deposit, toolkits...), build the
-workflow that does that product's follow-up: confirmation email, deal, nurture.
+workflow that does that product's follow-up. A production example:
+
+1. **Trigger:** **Manually triggered only**, with **Re-enroll on** so a repeat buyer
+   runs again.
+2. **Delay:** 1 minute.
+3. **Branch** on the product field for the plan bought (for example **Pay In Full**,
+   **Payment Plan**, **Member Payment**, then **None met**).
+4. **Send email** on each path, to *associated contacts labeled* "The associated
+   contact": the confirmation for that plan.
 
 **6b.** Create them on the **same object type as the router** (the Stripe payments
 object, or Payment). The router's **Go to workflow** action only lists workflows of
@@ -336,6 +375,12 @@ Payments):
 > didn't mean. Use exact names for products that share words (tiers of a ticket), and
 > keywords for one-of-a-kind products. Check the **None met** count after every launch.
 
+**Optional: a Product Category dropdown.** Instead of matching product names in every
+branch, add a **Product Category** dropdown on the payments object (one option per
+product line) and branch on it. Fill it for past payments with a CSV import into the
+payments object (**Update records**), matching on **Record ID** and mapping your
+category column to **Product Category** (wording may differ).
+
 **7e. Split one product by where the payment came from (optional).** For a deposit
 taken through two channels, add a second **Branch** under it on a source field (for
 example **Source ID** *is equal to any of* the id of each payment link or form). In each
@@ -370,8 +415,9 @@ run**. A routed payment reads, in order: *Triggered from: Records match criteria
 *The delay has started* → *Completed delay* → *Continuing on the "<branch>" branch* →
 *Started run in other workflow* → *Completed workflow*.
 
-**8c.** Open the product workflow's history: the run shows it was started by the
-router.
+**8c.** Open the product workflow's **Enrollment history**: the run's first log line
+reads *"Run started by another workflow: 1. Master Payment Routing"*, followed by its own
+delay, branch and *"Email sent to contact"*.
 
 ✅ **Check:** each product lands in its own workflow, and an unknown product ends on
 **None met**.
