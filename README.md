@@ -160,10 +160,11 @@ Create it and copy the `rk_live_...` key.
 
 About 5 minutes.
 
-**3a.** In HubSpot's **Service Keys** page (Settings → Integrations, wording may differ),
-click **Create service key**. Name it for this job (for example `Update Purchase w/
-Product Info`) and give it `crm.objects.custom.read` and `crm.objects.custom.write`.
-The key's page then lists its **Scopes**, with **Rotate**, **View Logs** and **Edit**.
+**3a.** In HubSpot's **Service Keys** page, click **Create service key**. On **Create Service
+Key**, enter a **Name** (*"It must be unique to this account."*), then under **Scopes**
+click **Add new scope** for each scope below, and click **Create**. Name it for this job (for example `Update Purchase w/ Product
+Info`) and add `crm.objects.custom.read` and `crm.objects.custom.write`. The key's page
+then lists its **Scopes**, with **Rotate**, **View Logs** and **Edit**.
 
 > ⚠️ **Give this action its own key.** In production the first version fell back to
 > another integration's secret when its own wasn't attached. That key was valid, so it
